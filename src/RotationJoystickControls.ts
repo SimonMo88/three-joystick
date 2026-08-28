@@ -1,35 +1,40 @@
-import { JoystickControls } from './JoystickControls';
-import { PerspectiveCamera, Object3D, Quaternion, Scene, Vector3 } from 'three';
+import {
+  type Object3D,
+  type PerspectiveCamera,
+  Quaternion,
+  type Scene,
+  Vector3,
+} from 'three';
+import { JoystickControls } from './JoystickControls.js';
+import { type JoystickOptions, type TMovement } from './types.js';
 
 /**
- * A joystick controller that can be used to rotate a target mesh
- * in a scene
+ * A joystick that rotates a target object.
  */
 export class RotationJoystickControls extends JoystickControls {
   /**
-   * Target object to control
+   * The object being rotated.
    */
   public target: Object3D;
   /**
-   * Used for scaling down the delta value of x and y
-   * that is passed to the update function's call back.
-   * You can use this to scale down user movement for controlling
-   * the speed.
+   * Scales the joystick displacement down into radians per frame.
+   *
+   * Displacement is clamped to `joystickTouchZone`, so with the
+   * defaults the target turns at most `75 * 0.001` radians per frame on
+   * each axis.
    */
   public deltaScale = 0.001;
   /**
-   * Used for determining which axis the up/down movement of
-   * the joystick influences
+   * The axis that up and down movement rotates around.
    */
   public verticalMovementAxis: Vector3 = new Vector3(1, 0, 0);
   /**
-   * Used for determining which axis the left/right movement of
-   * the joystick influences
+   * The axis that left and right movement rotates around.
    */
   public horizontalMovementAxis: Vector3 = new Vector3(0, 1, 0);
   /**
-   * This is a reference quarternion used for keeping track of the
-   * movement
+   * Scratch quaternion reused for each frame's rotation, so the loop
+   * does not allocate.
    */
   public quaternion: Quaternion = new Quaternion();
 
@@ -37,58 +42,41 @@ export class RotationJoystickControls extends JoystickControls {
     camera: PerspectiveCamera,
     scene: Scene,
     target: Object3D,
+    options: JoystickOptions = {},
   ) {
-    super(camera, scene);
+    super(camera, scene, options);
     this.target = target;
   }
 
   /**
-   * Converts and applies the angle in radians provided, to the
-   * vertical movement axis specified, in the reference quarternion.
-   *
-   * @param angleInRadians
+   * Applies a rotation about the given axis to the target.
    */
-  private rotateVerticalMovement = (angleInRadians: number) => {
-    this.quaternion.setFromAxisAngle(
-      this.verticalMovementAxis, angleInRadians,
-    );
-
-    this.target.quaternion.premultiply(
-      this.quaternion,
-    );
-  };
-
-  /**
-   * Converts and applies the angle in radians provided, to the
-   * horizontal movement axis specified, in the reference quarternion.
-   *
-   * @param angleInRadians
-   */
-  private rotateHorizontalMovement = (angleInRadians: number) => {
-    this.quaternion.setFromAxisAngle(
-      this.horizontalMovementAxis, angleInRadians,
-    );
-
-    this.target.quaternion.premultiply(
-      this.quaternion,
-    );
-  };
-
-  /**
-   * Call this function in the animate loop to update
-   * the rotation of the target mesh
-   */
-  public update = (): void => {
-    const joystickMovement = this.getJoystickMovement();
-
-    if (joystickMovement) {
-      this.rotateVerticalMovement(
-        joystickMovement.moveY * this.deltaScale,
-      );
-
-      this.rotateHorizontalMovement(
-        joystickMovement.moveX * this.deltaScale,
-      );
+  private rotateAroundAxis = (axis: Vector3, angleInRadians: number): void => {
+    if (angleInRadians === 0) {
+      return;
     }
+
+    this.quaternion.setFromAxisAngle(axis, angleInRadians);
+    this.target.quaternion.premultiply(this.quaternion);
+  };
+
+  /**
+   * Rotates the target in step with the joystick. Runs from the base
+   * class's `update`, so `update()` still drives the rotation and
+   * `update(callback)` additionally reports the movement.
+   */
+  protected override onUpdate = (movement: TMovement | null): void => {
+    if (!movement) {
+      return;
+    }
+
+    this.rotateAroundAxis(
+      this.verticalMovementAxis,
+      movement.moveY * this.deltaScale,
+    );
+    this.rotateAroundAxis(
+      this.horizontalMovementAxis,
+      movement.moveX * this.deltaScale,
+    );
   };
 }
