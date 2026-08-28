@@ -1,6 +1,6 @@
 # three-joystick
 
-[![CI](https://github.com/Fried-Chicken/three-joystick/actions/workflows/ci.yml/badge.svg)](https://github.com/Fried-Chicken/three-joystick/actions/workflows/ci.yml)
+[![CI](https://github.com/SimonMo88/three-joystick/actions/workflows/ci.yml/badge.svg)](https://github.com/SimonMo88/three-joystick/actions/workflows/ci.yml)
 
 An open source joystick for controlling a target in a [three.js](https://threejs.org) scene.
 
@@ -8,7 +8,7 @@ Press anywhere on the canvas and drag. The joystick base is planted
 where the press landed and the ball follows your pointer, clamped to the
 base. Works with touch, mouse and pen through the Pointer Events API.
 
-- **Demos:** [Basic](https://fried-chicken.github.io/three-joystick/BasicExample/) · [Rotating target](https://fried-chicken.github.io/three-joystick/RotatingTargetExample/)
+- **Demos:** [Basic](https://simonmo88.github.io/three-joystick/BasicExample/) · [Rotating target](https://simonmo88.github.io/three-joystick/RotatingTargetExample/)
 - **Requires:** three.js `>=0.150.0` (tested against `0.185.1`), a browser with Pointer Events
 
 ## Installation
