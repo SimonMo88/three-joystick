@@ -1,0 +1,42 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #05070d;
+  color: #e8ecf4;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overscroll-behavior: none;
+}
+
+#target {
+  position: fixed;
+  inset: 0;
+}
+
+#target canvas {
+  display: block;
+  /* The joystick sets this itself, but declaring it avoids a flash of
+     browser-handled panning before the controls are constructed. */
+  touch-action: none;
+}
+
+.hint {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 8%);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  user-select: none;
+}

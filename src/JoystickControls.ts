@@ -1,114 +1,205 @@
-import * as THREE from 'three';
-import isTouchOutOfBounds from './helpers/isTouchOutOfBounds';
-import degreesToRadians from './helpers/degreesToRadians';
-import getPositionInScene from './helpers/getPositionInScene';
+import {
+  CircleGeometry,
+  Mesh,
+  MeshBasicMaterial,
+  type PerspectiveCamera,
+  Quaternion,
+  type Scene,
+  Vector2,
+  type Vector3,
+} from 'three';
+import clampToCircle from './helpers/clampToCircle.js';
+import getPositionInScene from './helpers/getPositionInScene.js';
+import getViewportRect, { type ViewportRect } from './helpers/getViewportRect.js';
+import getWorldUnitsPerPixel from './helpers/getWorldUnitsPerPixel.js';
+import { type JoystickOptions, type TMovement } from './types.js';
 
+type JoystickMesh = Mesh<CircleGeometry, MeshBasicMaterial>;
+
+/**
+ * Radius of the ball as a fraction of the base radius.
+ */
+const BALL_RADIUS_RATIO = 0.5;
+
+/**
+ * Render orders high enough to put the joystick above ordinary scene
+ * content. Paired with `depthTest: false` so the joystick is drawn on
+ * top no matter where it sits in the scene.
+ */
+const BASE_RENDER_ORDER = 999;
+const BALL_RENDER_ORDER = 1000;
+
+/**
+ * A screen space joystick drawn into a three.js scene.
+ *
+ * Press anywhere on the canvas and drag: the base is planted where the
+ * press landed and the ball follows the pointer, clamped to
+ * `joystickTouchZone`. Call {@link update} once per frame to read the
+ * displacement.
+ */
 export class JoystickControls {
   /**
-   * This is the three.js scene
+   * The three.js scene the joystick draws itself into.
    */
-  scene: THREE.Scene;
+  scene: Scene;
   /**
-   * This is the three.js  camera
+   * The camera the joystick is positioned in front of.
    */
-  camera: THREE.PerspectiveCamera;
+  camera: PerspectiveCamera;
   /**
-   * This is used to detect if the user has moved outside the
-   * joystick base. It will snap the joystick ball to the bounds
-   * of the base of the joystick
+   * The element pointer events are read from, normally
+   * `renderer.domElement`. `null` means listen on `window` and assume a
+   * full-window canvas.
+   */
+  domElement: HTMLElement | null;
+  /**
+   * Radius of the joystick base in CSS pixels. The ball is clamped to
+   * this radius and the reported movement is normalised against it.
    */
   joystickTouchZone = 75;
   /**
-   * Anchor of the joystick base
+   * Distance in front of the camera at which the joystick is drawn.
    */
-  baseAnchorPoint: THREE.Vector2 = new THREE.Vector2();
+  joystickScale = 15;
   /**
-   * Current point of the joystick ball
+   * Colour of the joystick base.
    */
-  touchPoint: THREE.Vector2 = new THREE.Vector2();
+  baseColor = 0xffffff;
   /**
-   * Function that allows you to prevent the joystick
-   * from attaching
+   * Colour of the joystick ball.
+   */
+  ballColor = 0xcccccc;
+  /**
+   * Opacity of both joystick meshes.
+   */
+  opacity = 0.5;
+  /**
+   * Where the gesture started, in client coordinates. The base is drawn
+   * here and all displacement is measured from here.
+   */
+  baseAnchorPoint: Vector2 = new Vector2();
+  /**
+   * The pointer's current position, in client coordinates.
+   */
+  touchPoint: Vector2 = new Vector2();
+  /**
+   * Return `true` to stop the joystick attaching. Evaluated once per
+   * gesture, when the pointer goes down.
    */
   preventAction: () => boolean = () => false;
   /**
-   * True when user has begun interaction
+   * True between pointer down and pointer up, whether or not the
+   * joystick has become visible yet.
    */
-  interactionHasBegan = false;
+  interactionHasBegun = false;
   /**
-   * True when the joystick has been attached to the scene
+   * True while the joystick meshes are in the scene.
    */
   isJoystickAttached = false;
+
   /**
-   * Setting joystickScale will scale the joystick up or down in size
+   * Meshes are held by reference rather than looked up by name, so that
+   * several joysticks can share one scene and so a missing mesh can
+   * never be mistaken for a present one.
    */
-  joystickScale = 15;
+  private joystickBase: JoystickMesh | null = null;
+  private joystickBall: JoystickMesh | null = null;
+  /**
+   * The pointer that owns the current gesture. Every other pointer is
+   * ignored until it ends, so a second finger cannot hijack the
+   * joystick and lifting a second finger cannot end it.
+   */
+  private activePointerId: number | null = null;
+  /**
+   * The element `create` bound `pointerdown` to, remembered so that
+   * `destroy` unbinds from the same element.
+   */
+  private pointerDownTarget: EventTarget | null = null;
+  private previousTouchAction: string | null = null;
+  /**
+   * Base radius in world units, derived from `joystickTouchZone` when
+   * the joystick is attached.
+   */
+  private baseRadius = 0;
+  private readonly billboardQuaternion = new Quaternion();
 
   constructor(
-    camera: THREE.PerspectiveCamera,
-    scene: THREE.Scene,
+    camera: PerspectiveCamera,
+    scene: Scene,
+    options: JoystickOptions = {},
   ) {
     this.camera = camera;
     this.scene = scene;
+    this.domElement = options.domElement ?? null;
+
+    if (options.joystickTouchZone !== undefined) {
+      this.joystickTouchZone = options.joystickTouchZone;
+    }
+
+    if (options.joystickScale !== undefined) {
+      this.joystickScale = options.joystickScale;
+    }
+
+    if (options.baseColor !== undefined) {
+      this.baseColor = options.baseColor;
+    }
+
+    if (options.ballColor !== undefined) {
+      this.ballColor = options.ballColor;
+    }
+
+    if (options.opacity !== undefined) {
+      this.opacity = options.opacity;
+    }
+
+    if (options.preventAction !== undefined) {
+      this.preventAction = options.preventAction;
+    }
+
     this.create();
   }
 
   /**
-   * Touch start event listener
+   * Starts a gesture, unless one is already in flight or the host has
+   * vetoed it.
    */
-  private handleTouchStart = (event: TouchEvent) => {
+  private handlePointerDown = (event: PointerEvent): void => {
+    if (this.activePointerId !== null) {
+      return;
+    }
+
+    /**
+     * Only the primary mouse button drives the joystick. A right click
+     * opens a context menu that can swallow the matching pointer up,
+     * which used to leave the joystick stuck on.
+     */
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+
     if (this.preventAction()) {
       return;
     }
 
-    const touch = event.touches.item(0);
-
-    if (!touch) {
-      return;
-    }
-
-    this.onStart(touch.clientX, touch.clientY);
-  };
-
-  /**
-   * Mouse down event listener
-   */
-  private handleMouseDown = (event: MouseEvent) => {
-    if (this.preventAction()) {
-      return;
-    }
-
+    this.activePointerId = event.pointerId;
     this.onStart(event.clientX, event.clientY);
   };
 
   /**
-   * Plots the anchor point
+   * Plots the anchor point.
    */
-  private onStart = (clientX: number, clientY: number) => {
-    this.baseAnchorPoint = new THREE.Vector2(clientX, clientY);
-    this.interactionHasBegan = true;
+  private onStart = (clientX: number, clientY: number): void => {
+    this.baseAnchorPoint.set(clientX, clientY);
+    /**
+     * Seed the touch point too, so a gesture can never open holding the
+     * displacement left behind by the previous one.
+     */
+    this.touchPoint.set(clientX, clientY);
+    this.interactionHasBegun = true;
   };
 
-  /**
-   * Touch move event listener
-   */
-  private handleTouchMove = (event: TouchEvent) => {
-    if (this.preventAction()) {
-      return;
-    }
-
-    const touch = event.touches.item(0);
-
-    if (touch) {
-      this.onMove(touch.clientX, touch.clientY);
-    }
-  };
-
-  /**
-   * Mouse move event listener
-   */
-  private handleMouseMove = (event: MouseEvent) => {
-    if (this.preventAction()) {
+  private handlePointerMove = (event: PointerEvent): void => {
+    if (event.pointerId !== this.activePointerId) {
       return;
     }
 
@@ -116,37 +207,27 @@ export class JoystickControls {
   };
 
   /**
-   * Updates the joystick position during user interaction
+   * Attaches the joystick on the first movement of a gesture, then
+   * tracks the pointer.
    */
-  private onMove = (clientX: number, clientY: number) => {
-    if (!this.interactionHasBegan) {
-      return;
-    }
+  private onMove = (clientX: number, clientY: number): void => {
+    this.touchPoint.set(clientX, clientY);
 
-    this.touchPoint = new THREE.Vector2(clientX, clientY);
+    const viewport = getViewportRect(this.domElement);
+    const joystickBall = this.joystickBall ?? this.attachJoystick(viewport);
 
-    const positionInScene = getPositionInScene(
-      clientX,
-      clientY,
-      this.camera,
-      this.joystickScale,
-    );
-
-    if (!this.isJoystickAttached) {
-      /**
-       * If there is no base or ball, then we need to attach the joystick
-       */
-      return this.attachJoystick(positionInScene);
-    }
-
-    this.updateJoystickBallPosition(clientX, clientY, positionInScene);
+    this.updateJoystickBallPosition(joystickBall, viewport);
   };
 
   /**
-   * Handles the touchend and mouseup events
+   * Ends the gesture on pointer up and on pointer cancel.
+   *
+   * Handling cancel matters: when the OS takes a touch away, no pointer
+   * up arrives, and without this the joystick would stay attached and
+   * keep reporting its last displacement forever.
    */
-  private handleEventEnd = () => {
-    if (!this.isJoystickAttached) {
+  private handlePointerEnd = (event: PointerEvent): void => {
+    if (event.pointerId !== this.activePointerId) {
       return;
     }
 
@@ -154,185 +235,285 @@ export class JoystickControls {
   };
 
   /**
-   * Clean up joystick when the user interaction has finished
+   * Returns to the idle state. Safe to call at any point in a gesture,
+   * including one that never attached the joystick.
    */
-  private onEnd = () => {
-    const joystickBase = this.scene.getObjectByName('joystick-base');
-    const joyStickBall = this.scene.getObjectByName('joystick-ball');
+  private onEnd = (): void => {
+    this.activePointerId = null;
+    this.interactionHasBegun = false;
+    /**
+     * Collapse the displacement to zero so a stale delta cannot be read
+     * back after the gesture.
+     */
+    this.touchPoint.copy(this.baseAnchorPoint);
 
-    if (joystickBase){
-        this.scene.remove(joystickBase);
-    }
-
-    if ( joyStickBall) {
-      this.scene.remove(joyStickBall);
-    }
-
-    this.isJoystickAttached = false;
-    this.interactionHasBegan = false;
+    this.detachJoystick();
   };
 
   /**
-   * Draws the joystick base and ball
-   *
-   * TODO: Add feature to allow an image to be loaded.
-   * TODO: Add option to change color and size of the joystick
+   * Builds one of the two joystick meshes.
    */
-  private attachJoystickUI = (
+  private createJoystickUI = (
     name: string,
-    position: THREE.Vector3,
+    position: Vector3,
     color: number,
-    size: number,
-  ) => {
-    const zoomScale = 1 / this.camera.zoom;
-    const geometry = new THREE.CircleGeometry(size * zoomScale, 72);
-    const material = new THREE.MeshLambertMaterial({
-      color: color,
-      opacity: 0.5,
+    radius: number,
+    renderOrder: number,
+  ): JoystickMesh => {
+    const geometry = new CircleGeometry(radius, 64);
+    /**
+     * Basic rather than Lambert: the joystick is a HUD element, and an
+     * unlit material keeps it legible in scenes with no lights, one
+     * light, or a moving light.
+     */
+    const material = new MeshBasicMaterial({
+      color,
+      opacity: this.opacity,
       transparent: true,
       depthTest: false,
+      depthWrite: false,
     });
-    const uiElement = new THREE.Mesh(geometry, material);
+    const uiElement: JoystickMesh = new Mesh(geometry, material);
 
-    uiElement.renderOrder = 1;
     uiElement.name = name;
+    uiElement.renderOrder = renderOrder;
     uiElement.position.copy(position);
-
+    uiElement.frustumCulled = false;
     this.scene.add(uiElement);
+
+    return uiElement;
   };
 
   /**
-   * Creates the ball and base of the joystick
+   * Creates the base and ball, both anchored at the point where the
+   * gesture started.
    */
-  private attachJoystick = (positionInScene: THREE.Vector3) => {
-    this.attachJoystickUI(
-      'joystick-base',
-      positionInScene,
-      0xFFFFFF,
-      0.9,
+  private attachJoystick = (viewport: ViewportRect): JoystickMesh => {
+    const unitsPerPixel = getWorldUnitsPerPixel(
+      this.camera,
+      this.joystickScale,
+      viewport.height,
     );
-    this.attachJoystickUI(
+
+    this.baseRadius = this.joystickTouchZone * unitsPerPixel;
+
+    /**
+     * Anchored at the press, not at the first movement, so that what is
+     * drawn and what is reported share an origin.
+     */
+    const basePosition = getPositionInScene(
+      this.baseAnchorPoint.x,
+      this.baseAnchorPoint.y,
+      this.camera,
+      this.joystickScale,
+      viewport,
+    );
+
+    const joystickBall = this.createJoystickUI(
       'joystick-ball',
-      positionInScene,
-      0xCCCCCC,
-      0.5,
+      basePosition,
+      this.ballColor,
+      this.baseRadius * BALL_RADIUS_RATIO,
+      BALL_RENDER_ORDER,
     );
 
+    this.joystickBase = this.createJoystickUI(
+      'joystick-base',
+      basePosition,
+      this.baseColor,
+      this.baseRadius,
+      BASE_RENDER_ORDER,
+    );
+    this.joystickBall = joystickBall;
     this.isJoystickAttached = true;
+    this.faceCamera();
+
+    return joystickBall;
   };
 
   /**
-   * Calculates if the touch point was outside the joystick and
-   * either returns the joystick ball position bound to the perimeter of
-   * the base, or the position inside the base.
+   * Removes the joystick from the scene and releases its GPU
+   * resources. A gesture allocates a geometry and a material per mesh,
+   * so skipping the disposal leaks a little VRAM on every drag.
    */
-  private getJoystickBallPosition = (
-    clientX: number,
-    clientY: number,
-    positionInScene: THREE.Vector3,
-  ): THREE.Vector3 => {
-    const touchWasOutsideJoystick = isTouchOutOfBounds(
-      clientX,
-      clientY,
-      this.baseAnchorPoint,
+  private detachJoystick = (): void => {
+    this.disposeMesh(this.joystickBase);
+    this.disposeMesh(this.joystickBall);
+
+    this.joystickBase = null;
+    this.joystickBall = null;
+    this.isJoystickAttached = false;
+  };
+
+  private disposeMesh = (mesh: JoystickMesh | null): void => {
+    if (!mesh) {
+      return;
+    }
+
+    this.scene.remove(mesh);
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+  };
+
+  /**
+   * Turns both meshes to face the camera.
+   *
+   * A `CircleGeometry` lies in the XY plane, so without this the
+   * joystick would go edge on, and eventually invisible, for any camera
+   * that is not looking straight down -Z.
+   */
+  private faceCamera = (): void => {
+    if (!this.joystickBase || !this.joystickBall) {
+      return;
+    }
+
+    this.camera.getWorldQuaternion(this.billboardQuaternion);
+    this.joystickBase.quaternion.copy(this.billboardQuaternion);
+    this.joystickBall.quaternion.copy(this.billboardQuaternion);
+  };
+
+  /**
+   * Moves the ball to the pointer, clamped to the perimeter of the
+   * base.
+   */
+  private updateJoystickBallPosition = (
+    joystickBall: JoystickMesh,
+    viewport: ViewportRect,
+  ): void => {
+    const clamped = clampToCircle(
+      this.touchPoint.x,
+      this.touchPoint.y,
+      this.baseAnchorPoint.x,
+      this.baseAnchorPoint.y,
       this.joystickTouchZone,
     );
 
-    if (touchWasOutsideJoystick) {
-      /**
-       * Touch was outside Base so restrict the ball to the base perimeter
-       */
-      const angle = Math.atan2(
-        clientY - this.baseAnchorPoint.y,
-        clientX - this.baseAnchorPoint.x,
-      ) - degreesToRadians(90);
-      const xDistance = Math.sin(angle) * this.joystickTouchZone;
-      const yDistance = Math.cos(angle) * this.joystickTouchZone;
-      const direction = new THREE.Vector3(-xDistance, -yDistance, 0)
-        .normalize();
-      const joyStickBase = this.scene.getObjectByName('joystick-base');
-
-      /**
-       * positionInScene restricted to the perimeter of the joystick
-       * base
-       */
-      return (joyStickBase as THREE.Object3D).position.clone().add(direction);
-    }
-
-    /**
-     * Touch was inside the Base so just set the joystick ball to that
-     * position
-     */
-    return positionInScene;
-  };
-
-  /**
-   * Attaches the joystick or updates the joystick ball position
-   */
-  private updateJoystickBallPosition = (
-    clientX: number,
-    clientY: number,
-    positionInScene: THREE.Vector3,
-  ) => {
-    const joyStickBall = this.scene.getObjectByName('joystick-ball');
-    const joystickBallPosition = this.getJoystickBallPosition(
-      clientX,
-      clientY,
-      positionInScene,
+    joystickBall.position.copy(
+      getPositionInScene(
+        clamped.x,
+        clamped.y,
+        this.camera,
+        this.joystickScale,
+        viewport,
+      ),
     );
-
-    /**
-     * Inside Base so just copy the position
-     */
-    joyStickBall?.position.copy(joystickBallPosition);
   };
 
   /**
-   * Calculates and returns the distance the user has moved the
-   * joystick from the center of the joystick base.
+   * The displacement of the joystick from its anchor, or `null` when
+   * the joystick is not attached.
+   *
+   * Clamped to `joystickTouchZone`, so it agrees with the ball the user
+   * can see instead of growing without limit as they drag away.
    */
   protected getJoystickMovement = (): TMovement | null => {
     if (!this.isJoystickAttached) {
       return null;
     }
 
+    const clamped = clampToCircle(
+      this.touchPoint.x,
+      this.touchPoint.y,
+      this.baseAnchorPoint.x,
+      this.baseAnchorPoint.y,
+      this.joystickTouchZone,
+    );
+
+    const moveX = clamped.x - this.baseAnchorPoint.x;
+    const moveY = clamped.y - this.baseAnchorPoint.y;
+    const divisor = this.joystickTouchZone > 0 ? this.joystickTouchZone : 1;
+
     return {
-      moveX: this.touchPoint.x - this.baseAnchorPoint.x,
-      moveY: this.touchPoint.y - this.baseAnchorPoint.y,
+      moveX,
+      moveY,
+      normalizedX: moveX / divisor,
+      normalizedY: moveY / divisor,
+      distance: clamped.clampedDistance,
+      angle: Math.atan2(moveY, moveX),
     };
   };
 
   /**
-   * Adds event listeners to the document
+   * Hook for subclasses, called once per {@link update} before the
+   * caller's callback.
+   */
+  protected onUpdate = (_movement: TMovement | null): void => {
+    /** Intentionally empty. */
+  };
+
+  /**
+   * Binds the pointer listeners. Called by the constructor, and safe to
+   * call again after {@link destroy}. Calling it twice does not stack
+   * duplicate listeners.
    */
   public create = (): void => {
-    window.addEventListener('touchstart', this.handleTouchStart);
-    window.addEventListener('touchmove', this.handleTouchMove);
-    window.addEventListener('touchend', this.handleEventEnd);
-    window.addEventListener('mousedown', this.handleMouseDown);
-    window.addEventListener('mousemove', this.handleMouseMove);
-    window.addEventListener('mouseup', this.handleEventEnd);
+    if (this.pointerDownTarget) {
+      return;
+    }
+
+    /**
+     * Pointer down is scoped to the canvas when one was supplied, so
+     * the joystick ignores presses on surrounding UI. Move and end stay
+     * on the window so a drag that leaves the canvas still completes.
+     */
+    this.pointerDownTarget = this.domElement ?? window;
+    this.pointerDownTarget.addEventListener(
+      'pointerdown',
+      this.handlePointerDown as EventListener,
+    );
+    window.addEventListener('pointermove', this.handlePointerMove as EventListener);
+    window.addEventListener('pointerup', this.handlePointerEnd as EventListener);
+    window.addEventListener('pointercancel', this.handlePointerEnd as EventListener);
+
+    /**
+     * Stops the browser claiming the gesture for scrolling or
+     * pinch-zoom, which would otherwise cancel the pointer mid-drag.
+     */
+    if (this.domElement) {
+      this.previousTouchAction = this.domElement.style.touchAction;
+      this.domElement.style.touchAction = 'none';
+    }
   };
 
   /**
-   * Removes event listeners from the document
+   * Unbinds every listener, ends any gesture in progress, and disposes
+   * the joystick meshes.
    */
   public destroy = (): void => {
-    window.removeEventListener('touchstart', this.handleTouchStart);
-    window.removeEventListener('touchmove', this.handleTouchMove);
-    window.removeEventListener('touchend', this.handleEventEnd);
-    window.removeEventListener('mousedown', this.handleMouseDown);
-    window.removeEventListener('mousemove', this.handleMouseMove);
-    window.removeEventListener('mouseup', this.handleEventEnd);
+    if (this.pointerDownTarget) {
+      this.pointerDownTarget.removeEventListener(
+        'pointerdown',
+        this.handlePointerDown as EventListener,
+      );
+      this.pointerDownTarget = null;
+    }
+
+    window.removeEventListener('pointermove', this.handlePointerMove as EventListener);
+    window.removeEventListener('pointerup', this.handlePointerEnd as EventListener);
+    window.removeEventListener('pointercancel', this.handlePointerEnd as EventListener);
+
+    if (this.domElement && this.previousTouchAction !== null) {
+      this.domElement.style.touchAction = this.previousTouchAction;
+      this.previousTouchAction = null;
+    }
+
+    this.onEnd();
   };
 
   /**
-   * function that updates the positioning, this needs to be called
-   * in the animation loop
+   * Call once per frame from your animation loop. The callback receives
+   * the current displacement, or `null` when the joystick is idle.
    */
-  public update = (callback?: (movement?: TMovement | null) => void): void => {
+  public update = (callback?: (movement: TMovement | null) => void): void => {
+    /**
+     * Re-aimed every frame rather than only on movement, so the
+     * joystick stays square to a camera that moves under it.
+     */
+    this.faceCamera();
+
     const movement = this.getJoystickMovement();
 
+    this.onUpdate(movement);
     callback?.(movement);
   };
 }
