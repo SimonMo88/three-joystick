@@ -1,77 +1,69 @@
-import './styles.scss';
-import * as THREE from 'three';
-import { JoystickControls } from '../../src';
+import {
+  AmbientLight,
+  Mesh,
+  MeshPhongMaterial,
+  PerspectiveCamera,
+  Scene,
+  SphereGeometry,
+  WebGLRenderer,
+} from 'three';
+import { JoystickControls } from 'three-joystick';
 
-declare global {
-  interface Window { basicExample: BasicExample; }
+const container = document.getElementById('target');
+
+if (!container) {
+  throw new Error('Missing #target container');
 }
 
-class BasicExample {
-  element = document.getElementById('target');
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera();
-  renderer = new THREE.WebGLRenderer({
-    antialias: true,
-  });
-  joystickControls: JoystickControls;
-  target: THREE.Mesh;
-  geometry = new THREE.SphereGeometry(1, 36, 36);
-  material = new THREE.MeshPhongMaterial({
-    wireframe: true,
-    color: 0xFFFFFF,
-  });
-  light = new THREE.AmbientLight(0xFFFFFF);
+const scene = new Scene();
+const camera = new PerspectiveCamera(50, 1, 0.1, 2000);
+const renderer = new WebGLRenderer({ antialias: true });
+const target = new Mesh(
+  new SphereGeometry(1, 36, 36),
+  new MeshPhongMaterial({ wireframe: true, color: 0xffffff }),
+);
 
-  constructor() {
-    this.target = new THREE.Mesh(this.geometry, this.material);
-    this.joystickControls = new JoystickControls(
-      this.camera,
-      this.scene,
-    );
-    this.setupScene();
-  }
+camera.position.z = 5;
+scene.add(camera, target, new AmbientLight(0xffffff));
 
-  setupScene = () => {
-    this.element?.appendChild(this.renderer.domElement);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+container.appendChild(renderer.domElement);
 
-    this.camera.position.z = 5;
-
-    this.scene.add(
-      this.camera,
-      this.target,
-      this.light,
-    );
-
-    this.resize();
-    this.animate();
-
-    window.addEventListener('resize', this.resize);
-  };
-
-  resize = () => {
-    const width = this.element?.clientWidth || 0;
-    const height = this.element?.clientHeight || 0;
-
-    this.renderer.setSize(width, height);
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-  };
-
-  animate = () => {
-    requestAnimationFrame(this.animate);
-
-    this.joystickControls.update((movement) => {
-      if (movement) {
-        const sensitivity = 0.001;
-        this.target.position.x += movement.moveX * sensitivity;
-        this.target.position.y -= movement.moveY * sensitivity;
-      }
-    });
-
-    this.renderer.render(this.scene, this.camera);
-  };
-}
-
-window.addEventListener('load', () => {
- window.basicExample = new BasicExample();
+/**
+ * Passing the canvas is what lets the joystick map pointer coordinates
+ * onto it correctly when it is not the whole window.
+ */
+const joystickControls = new JoystickControls(camera, scene, {
+  domElement: renderer.domElement,
 });
+
+const resize = (): void => {
+  const { clientWidth, clientHeight } = container;
+
+  renderer.setSize(clientWidth, clientHeight);
+  camera.aspect = clientWidth / Math.max(clientHeight, 1);
+  camera.updateProjectionMatrix();
+};
+
+const animate = (): void => {
+  joystickControls.update((movement) => {
+    if (!movement) {
+      return;
+    }
+
+    /**
+     * `normalizedX` and `normalizedY` are always within -1..1, so the
+     * speed does not depend on the size of the screen.
+     */
+    const speed = 0.05;
+
+    target.position.x += movement.normalizedX * speed;
+    target.position.y -= movement.normalizedY * speed;
+  });
+
+  renderer.render(scene, camera);
+};
+
+resize();
+window.addEventListener('resize', resize);
+renderer.setAnimationLoop(animate);
